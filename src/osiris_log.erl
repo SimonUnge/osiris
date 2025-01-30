@@ -8,6 +8,7 @@
 -module(osiris_log).
 
 -include("osiris.hrl").
+-include("osiris_log.hrl").
 -include_lib("kernel/include/file.hrl").
 
 -export([init/1,
@@ -28,6 +29,7 @@
          send_file/3,
          init_data_reader/2,
          init_offset_reader/2,
+         %% Is this only for testing?
          read_header/1,
          chunk_iterator/1,
          chunk_iterator/2,
@@ -52,7 +54,8 @@
          evaluate_retention/2,
          directory/1,
          delete_directory/1,
-         make_counter/1]).
+         make_counter/1,
+         needs_handling/3]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -66,44 +69,6 @@
          make_chunk/7,
          orphaned_segments/1
         ]).
-
-% maximum size of a segment in bytes
--define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
-% maximum number of chunks per segment
--define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
--define(C_OFFSET, 1).
--define(C_FIRST_OFFSET, 2).
--define(C_FIRST_TIMESTAMP, 3).
--define(C_CHUNKS, 4).
--define(C_SEGMENTS, 5).
--define(COUNTER_FIELDS,
-        [
-         {offset, ?C_OFFSET, counter,
-          "The last offset (not chunk id) in the log for writers. The last offset read for readers" },
-         {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
-         {first_timestamp, ?C_FIRST_TIMESTAMP, counter, "First timestamp, not updated for readers"},
-         {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
-         {segments, ?C_SEGMENTS, counter, "Number of segments"}
-        ]
-       ).
-
--define(ZERO_IDX_MATCH(Rem),
-        <<0:64/unsigned,
-          0:64/signed,
-          0:64/unsigned,
-          0:32/unsigned,
-          0:8/unsigned,
-         Rem/binary>>).
-
--define(IDX_MATCH(ChId, Epoch, FilePos),
-        <<ChId:64/unsigned,
-          _:64/signed,
-          Epoch:64/unsigned,
-          FilePos:32/unsigned,
-          _:8/unsigned,
-        _/binary>>).
-
--define(SKIP_SEARCH_JUMP, 2048).
 
 %% Specification of the Log format.
 %%
@@ -353,14 +318,6 @@
 %%   | Chunk Type    |
 %%   +---------------+
 
--type offset() :: osiris:offset().
--type epoch() :: osiris:epoch().
--type range() :: empty | {From :: offset(), To :: offset()}.
--type counter_spec() :: {Tag :: term(), Fields :: [atom()]}.
--type chunk_type() ::
-    ?CHNK_USER |
-    ?CHNK_TRK_DELTA |
-    ?CHNK_TRK_SNAPSHOT.
 -type config() ::
     osiris:config() |
     #{dir := file:filename_all(),
@@ -386,51 +343,8 @@
 -type offset_entry() :: {offset(), osiris:entry()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
--type header_map() ::
-    #{chunk_id => offset(),
-      epoch => epoch(),
-      type => chunk_type(),
-      crc => integer(),
-      num_records => non_neg_integer(),
-      num_entries => non_neg_integer(),
-      timestamp => osiris:timestamp(),
-      data_size => non_neg_integer(),
-      trailer_size => non_neg_integer(),
-      filter_size => 16..255,
-      header_data => binary(),
-      position => non_neg_integer(),
-      next_position => non_neg_integer()}.
--type transport() :: tcp | ssl.
 
 %% holds static or rarely changing fields
--record(cfg,
-        {directory :: file:filename_all(),
-         name :: osiris:name(),
-         max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
-         max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
-         tracking_config = #{} :: osiris_tracking:config(),
-         retention = [] :: [osiris:retention_spec()],
-         counter :: counters:counters_ref(),
-         counter_id :: term(),
-         %% the maximum number of active writer deduplication sessions
-         %% that will be included in snapshots written to new segments
-         readers_counter_fun = fun(_) -> ok end :: function(),
-         shared :: atomics:atomics_ref(),
-         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
-         }).
--record(read,
-        {type :: data | offset,
-         next_offset = 0 :: offset(),
-         transport :: transport(),
-         chunk_selector :: all | user_data,
-         position = 0 :: non_neg_integer(),
-         filter :: undefined | osiris_bloom:mstate()}).
--record(write,
-        {type = writer :: writer | acceptor,
-         segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
-         current_epoch :: non_neg_integer(),
-         tail_info = {0, empty} :: osiris:tail_info()
-        }).
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
@@ -1381,26 +1295,8 @@ counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
 -spec read_header(state()) ->
     {ok, header_map(), state()} | {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
-read_header(#?MODULE{cfg = #cfg{}} = State0) ->
-    %% reads the next chunk of entries, parsed
-    %% NB: this may return records before the requested index,
-    %% that is fine - the reading process can do the appropriate filtering
-    %% TODO: skip non user chunks for offset readers
-    case catch read_header0(State0) of
-        {ok,
-         #{num_records := NumRecords,
-           next_position := NextPos} =
-             Header,
-         #?MODULE{mode = #read{next_offset = ChId} = Read} = State} ->
-            %% skip data portion
-            {ok, Header,
-             State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
-                                            position = NextPos}}};
-        {end_of_stream, _} = EOF ->
-            EOF;
-        {error, _} = Err ->
-            Err
-    end.
+read_header(State) ->
+    osiris_segment_classic:read_header(State).
 
 -record(iterator, {fd :: file:io_device(),
                    next_offset :: offset(),
@@ -1429,108 +1325,21 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(State) ->
-    chunk_iterator(State, 1).
+    osiris_segment_classic:chunk_iterator(State, 1).
 
 -spec chunk_iterator(state(), pos_integer() | all) ->
     {ok, header_map(), chunk_iterator(), state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
-chunk_iterator(#?MODULE{cfg = #cfg{},
-                        mode = #read{type = RType,
-                                     chunk_selector = Selector}
-                       } = State0, CreditHint)
+chunk_iterator(State, CreditHint)
   when (is_integer(CreditHint) andalso CreditHint > 0) orelse
        is_atom(CreditHint) ->
-    %% reads the next chunk of unparsed chunk data
-    case catch read_header0(State0) of
-        {ok,
-         #{type := ChType,
-           chunk_id := ChId,
-           crc := Crc,
-           num_entries := NumEntries,
-           num_records := NumRecords,
-           data_size := DataSize,
-           filter_size := FilterSize,
-           position := Pos,
-           next_position := NextPos} = Header,
-         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
-            State = State1#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
-                                                    position = NextPos}},
-            case needs_handling(RType, Selector, ChType) of
-                true ->
-                    DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
-                    Data = iter_read_ahead(Fd, DataPos, ChId, Crc, CreditHint,
-                                           DataSize, NumEntries),
-                    Iterator = #iterator{fd = Fd,
-                                         data = Data,
-                                         next_offset = ChId,
-                                         num_left = NumEntries,
-                                         next_record_pos = DataPos},
-                    {ok, Header, Iterator, State};
-                false ->
-                    %% skip
-                    chunk_iterator(State, CreditHint)
-            end;
-        Other ->
-            Other
-    end.
+    osiris_segment_classic:chunk_iterator(State, CreditHint).
 
 -spec iterator_next(chunk_iterator()) ->
     end_of_chunk | {offset_entry(), chunk_iterator()}.
-iterator_next(#iterator{num_left = 0}) ->
-    end_of_chunk;
-iterator_next(#iterator{fd = Fd,
-                        next_offset = NextOffs,
-                        num_left = Num,
-                        data = ?REC_MATCH_SIMPLE(Len, Rem0),
-                        next_record_pos = Pos} = I0) ->
-    {Record, Rem} =
-        case Rem0 of
-            <<Record0:Len/binary, Rem1/binary>> ->
-                {Record0, Rem1};
-            _ ->
-                %% not enough in Rem0 to read the entire record
-                %% so we need to read it from disk
-                {ok, <<Record0:Len/binary, Rem1/binary>>} =
-                    file:pread(Fd, Pos + ?REC_HDR_SZ_SIMPLE_B,
-                               Len + ?ITER_READ_AHEAD_B),
-                {Record0, Rem1}
-        end,
-
-    I = I0#iterator{next_offset = NextOffs + 1,
-                    num_left = Num - 1,
-                    data = Rem,
-                    next_record_pos = Pos + ?REC_HDR_SZ_SIMPLE_B + Len},
-    {{NextOffs, Record}, I};
-iterator_next(#iterator{fd = Fd,
-                        next_offset = NextOffs,
-                        num_left = Num,
-                        data = ?REC_MATCH_SUBBATCH(CompType, NumRecs,
-                                                   UncompressedLen,
-                                                   Len, Rem0),
-                        next_record_pos = Pos} = I0) ->
-    {Data, Rem} =
-        case Rem0 of
-            <<Record0:Len/binary, Rem1/binary>> ->
-                {Record0, Rem1};
-            _ ->
-                %% not enough in Rem0 to read the entire record
-                %% so we need to read it from disk
-                {ok, <<Record0:Len/binary, Rem1/binary>>} =
-                    file:pread(Fd, Pos + ?REC_HDR_SZ_SUBBATCH_B,
-                               Len + ?ITER_READ_AHEAD_B),
-                {Record0, Rem1}
-        end,
-    Record = {batch, NumRecs, CompType, UncompressedLen, Data},
-    I = I0#iterator{next_offset = NextOffs + NumRecs,
-                    num_left = Num - 1,
-                    data = Rem,
-                    next_record_pos = Pos + ?REC_HDR_SZ_SUBBATCH_B + Len},
-    {{NextOffs, Record}, I};
-iterator_next(#iterator{fd = Fd,
-                        next_record_pos = Pos} = I) ->
-    {ok, Data} = file:pread(Fd, Pos, ?ITER_READ_AHEAD_B),
-    iterator_next(I#iterator{data = Data}).
+iterator_next(ChunkIterator) ->
+    osiris_segment_classic:iterator_next(ChunkIterator).
 
 -spec read_chunk(state()) ->
     {ok, binary(), state()} |
@@ -3204,24 +3013,6 @@ dump_crc_check(Fd) ->
         _ ->
             dump_crc_check(Fd)
     end.
-
-iter_read_ahead(_Fd, _Pos, _ChunkId, _Crc, 1, _DataSize, _NumEntries) ->
-    %% no point reading ahead if there is only one entry to be read at this
-    %% time
-    undefined;
-iter_read_ahead(Fd, Pos, ChunkId, Crc, Credit, DataSize, NumEntries)
-  when Credit == all orelse NumEntries == 1 ->
-    {ok, Data} = file:pread(Fd, Pos, DataSize),
-    validate_crc(ChunkId, Crc, Data),
-    Data;
-iter_read_ahead(Fd, Pos, _ChunkId, _Crc, Credit0, DataSize, NumEntries) ->
-    %% read ahead, assumes roughly equal entry sizes which may not be the case
-    %% TODO round up to nearest block?
-    %% We can only practically validate CRC if we read the whole data
-    Credit = min(Credit0, NumEntries),
-    Size = DataSize div NumEntries * Credit,
-    {ok, Data} = file:pread(Fd, Pos, Size + ?ITER_READ_AHEAD_B),
-    Data.
 
 list_dir(Dir) ->
     case prim_file:list_dir(Dir) of
