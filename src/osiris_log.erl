@@ -55,6 +55,7 @@
          directory/1,
          delete_directory/1,
          make_counter/1,
+         counter_id/1,
          needs_handling/3]).
 
 -export([dump_init/1,
@@ -395,201 +396,146 @@ init(Config) ->
     init(Config, writer).
 
 -spec init(config(), writer | acceptor) -> state().
-init(#{dir := Dir,
-       name := Name,
-       epoch := Epoch} = Config,
+init(#{dir := _Dir,
+       name := _Name,
+       epoch := _Epoch} = Config,
      WriterType) ->
-    %% scan directory for segments if in write mode
-    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
-                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
-                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
-    Retention = maps:get(retention, Config, []),
-    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
-    ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
-          [Name, Dir]),
-    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
-           max_segment_size_chunks ~b, retention ~w, filter size ~b",
-            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
-    ok = filelib:ensure_dir(Dir),
-    case file:make_dir(Dir) of
-        ok ->
-            ok;
-        {error, eexist} ->
-            ok;
-        Err ->
-            throw(Err)
-    end,
+    osiris_segment_classic:init(Config, WriterType).
+    %% %% scan directory for segments if in write mode
+    %% MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
+    %%                         ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    %% MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
+    %%                                     ?DEFAULT_MAX_SEGMENT_SIZE_C),
+    %% Retention = maps:get(retention, Config, []),
+    %% FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
+    %% ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
+    %%       [Name, Dir]),
+    %% ?DEBUG_(Name, "max_segment_size_bytes: ~b,
+    %%        max_segment_size_chunks ~b, retention ~w, filter size ~b",
+    %%         [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
+    %% ok = filelib:ensure_dir(Dir),
+    %% case file:make_dir(Dir) of
+    %%     ok ->
+    %%         ok;
+    %%     {error, eexist} ->
+    %%         ok;
+    %%     Err ->
+    %%         throw(Err)
+    %% end,
 
-    Cnt = make_counter(Config),
-    %% initialise offset counter to -1 as 0 is the first offset in the log and
-    %% it hasn't necessarily been written yet, for an empty log the first offset
-    %% is initialised to 0 however and will be updated after each retention run.
-    counters:put(Cnt, ?C_OFFSET, -1),
-    counters:put(Cnt, ?C_SEGMENTS, 0),
-    Shared = case Config of
-                 #{shared := S} ->
-                     S;
-                 _ ->
-                     osiris_log_shared:new()
-             end,
-    Cfg = #cfg{directory = Dir,
-               name = Name,
-               max_segment_size_bytes = MaxSizeBytes,
-               max_segment_size_chunks = MaxSizeChunks,
-               tracking_config = maps:get(tracking_config, Config, #{}),
-               retention = Retention,
-               counter = Cnt,
-               counter_id = counter_id(Config),
-               shared = Shared,
-               filter_size = FilterSize},
-    ok = maybe_fix_corrupted_files(Config),
-    DefaultNextOffset = case Config of
-                            #{initial_offset := IO}
-                              when WriterType == acceptor ->
-                                IO;
-                            _ ->
-                                0
-                        end,
-    case first_and_last_seginfos(Config) of
-        none ->
-            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
-            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
-            open_new_segment(#?MODULE{cfg = Cfg,
-                                      mode =
-                                          #write{type = WriterType,
-                                                 tail_info = {DefaultNextOffset,
-                                                              empty},
-                                                 current_epoch = Epoch}});
-        {NumSegments,
-         #seg_info{first = #chunk_info{id = FstChId,
-                                       timestamp = FstTs}},
-         #seg_info{file = Filename,
-                   index = IdxFilename,
-                   size = Size,
-                   last = #chunk_info{epoch = LastEpoch,
-                                      timestamp = LastTs,
-                                      id = LastChId,
-                                      num = LastNum}}} ->
-            %% assert epoch is same or larger
-            %% than last known epoch
-            case LastEpoch > Epoch of
-                true ->
-                    exit({invalid_epoch, LastEpoch, Epoch});
-                _ ->
-                    ok
-            end,
-            TailInfo = {LastChId + LastNum,
-                        {LastEpoch, LastChId, LastTs}},
+    %% Cnt = make_counter(Config),
+    %% %% initialise offset counter to -1 as 0 is the first offset in the log and
+    %% %% it hasn't necessarily been written yet, for an empty log the first offset
+    %% %% is initialised to 0 however and will be updated after each retention run.
+    %% counters:put(Cnt, ?C_OFFSET, -1),
+    %% counters:put(Cnt, ?C_SEGMENTS, 0),
+    %% Shared = case Config of
+    %%              #{shared := S} ->
+    %%                  S;
+    %%              _ ->
+    %%                  osiris_log_shared:new()
+    %%          end,
+    %% Cfg = #cfg{directory = Dir,
+    %%            name = Name,
+    %%            max_segment_size_bytes = MaxSizeBytes,
+    %%            max_segment_size_chunks = MaxSizeChunks,
+    %%            tracking_config = maps:get(tracking_config, Config, #{}),
+    %%            retention = Retention,
+    %%            counter = Cnt,
+    %%            counter_id = counter_id(Config),
+    %%            shared = Shared,
+    %%            filter_size = FilterSize},
+    %% ok = maybe_fix_corrupted_files(Config),
+    %% DefaultNextOffset = case Config of
+    %%                         #{initial_offset := IO}
+    %%                           when WriterType == acceptor ->
+    %%                             IO;
+    %%                         _ ->
+    %%                             0
+    %%                     end,
+    %% case first_and_last_seginfos(Config) of
+    %%     none ->
+    %%         osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
+    %%         osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+    %%         open_new_segment(#?MODULE{cfg = Cfg,
+    %%                                   mode =
+    %%                                       #write{type = WriterType,
+    %%                                              tail_info = {DefaultNextOffset,
+    %%                                                           empty},
+    %%                                              current_epoch = Epoch}});
+    %%     {NumSegments,
+    %%      #seg_info{first = #chunk_info{id = FstChId,
+    %%                                    timestamp = FstTs}},
+    %%      #seg_info{file = Filename,
+    %%                index = IdxFilename,
+    %%                size = Size,
+    %%                last = #chunk_info{epoch = LastEpoch,
+    %%                                   timestamp = LastTs,
+    %%                                   id = LastChId,
+    %%                                   num = LastNum}}} ->
+    %%         %% assert epoch is same or larger
+    %%         %% than last known epoch
+    %%         case LastEpoch > Epoch of
+    %%             true ->
+    %%                 exit({invalid_epoch, LastEpoch, Epoch});
+    %%             _ ->
+    %%                 ok
+    %%         end,
+    %%         TailInfo = {LastChId + LastNum,
+    %%                     {LastEpoch, LastChId, LastTs}},
 
-            counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
-            counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-            counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
-            counters:put(Cnt, ?C_SEGMENTS, NumSegments),
-            osiris_log_shared:set_first_chunk_id(Shared, FstChId),
-            osiris_log_shared:set_last_chunk_id(Shared, LastChId),
-            ?DEBUG_(Name, " next offset ~b first offset ~b",
-                    [element(1, TailInfo),
-                     FstChId]),
-            {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
-            {ok, Size} = file:position(SegFd, Size),
-            %% maybe_fix_corrupted_files has truncated the index to the last
-            %% record pointing
-            %% at a valid chunk we can now truncate the segment to size in
-            %% case there is trailing data
-            ok = file:truncate(SegFd),
-            {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            {ok, IdxEof} = file:position(IdxFd, eof),
-            NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
-            #?MODULE{cfg = Cfg,
-                     mode =
-                         #write{type = WriterType,
-                                tail_info = TailInfo,
-                                segment_size = {Size, NumChunks},
-                                current_epoch = Epoch},
-                     current_file = filename:basename(Filename),
-                     fd = SegFd,
-                     index_fd = IdxFd};
-        {1, #seg_info{file = Filename,
-                      index = IdxFilename,
-                      last = undefined}, _} ->
-            %% the empty log case
-            {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
-            {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
-            counters:put(Cnt, ?C_SEGMENTS, 1),
-            %% the segment could potentially have trailing data here so we'll
-            %% do a truncate just in case. The index would have been truncated
-            %% earlier
-            ok = file:truncate(SegFd),
-            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
-            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
-            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
-            #?MODULE{cfg = Cfg,
-                     mode =
-                         #write{type = WriterType,
-                                tail_info = {DefaultNextOffset, empty},
-                                current_epoch = Epoch},
-                     current_file = filename:basename(Filename),
-                     fd = SegFd,
-                     index_fd = IdxFd}
-    end.
-
-maybe_fix_corrupted_files([]) ->
-    ok;
-maybe_fix_corrupted_files(#{dir := Dir}) ->
-    ok = maybe_fix_corrupted_files(sorted_index_files(Dir)),
-    %% dangling segments can be left behind if the server process crashes
-    %% after the retention evaluator process deleted the index but
-    %% before it deleted the corresponding segment
-    [begin
-         ?INFO("deleting left over segment '~s' in directory ~s",
-               [F, Dir]),
-         ok = prim_file:delete(filename:join(Dir, F))
-     end|| F <- orphaned_segments(Dir)],
-    ok;
-maybe_fix_corrupted_files([IdxFile]) ->
-    SegFile = segment_from_index_file(IdxFile),
-    ok = truncate_invalid_idx_records(IdxFile, file_size_or_zero(SegFile)),
-    case file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
-        true ->
-            % the only index doesn't contain a single valid record
-            % make sure it has a valid header
-            {ok, IdxFd} = file:open(IdxFile, ?FILE_OPTS_WRITE),
-            ok = file:write(IdxFd, ?IDX_HEADER),
-            ok = file:close(IdxFd);
-        false ->
-            ok
-    end,
-    case file_size_or_zero(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
-        true ->
-            % the only segment doesn't contain a single valid chunk
-            % make sure it has a valid header
-            {ok, SegFd} = file:open(SegFile, ?FILE_OPTS_WRITE),
-            ok = file:write(SegFd, ?LOG_HEADER),
-            ok = file:close(SegFd);
-        false ->
-            ok
-    end;
-maybe_fix_corrupted_files(IdxFiles) ->
-    LastIdxFile = lists:last(IdxFiles),
-    LastSegFile = segment_from_index_file(LastIdxFile),
-    try file_size(LastSegFile) of
-        N when N =< ?HEADER_SIZE_B ->
-            % if the segment doesn't contain any chunks, just delete it
-            ?WARNING("deleting an empty segment file: ~0p", [LastSegFile]),
-            ok = prim_file:delete(LastIdxFile),
-            ok = prim_file:delete(LastSegFile),
-            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
-        LastSegFileSize ->
-            ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
-    catch missing_file ->
-            % if the last segment is missing, just delete its index
-            ?WARNING("deleting index of the missing last segment file: ~0p",
-                     [LastSegFile]),
-            ok = prim_file:delete(LastIdxFile),
-            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
-    end.
+    %%         counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
+    %%         counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
+    %%         counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
+    %%         counters:put(Cnt, ?C_SEGMENTS, NumSegments),
+    %%         osiris_log_shared:set_first_chunk_id(Shared, FstChId),
+    %%         osiris_log_shared:set_last_chunk_id(Shared, LastChId),
+    %%         ?DEBUG_(Name, " next offset ~b first offset ~b",
+    %%                 [element(1, TailInfo),
+    %%                  FstChId]),
+    %%         {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
+    %%         {ok, Size} = file:position(SegFd, Size),
+    %%         %% maybe_fix_corrupted_files has truncated the index to the last
+    %%         %% record pointing
+    %%         %% at a valid chunk we can now truncate the segment to size in
+    %%         %% case there is trailing data
+    %%         ok = file:truncate(SegFd),
+    %%         {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
+    %%         {ok, IdxEof} = file:position(IdxFd, eof),
+    %%         NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
+    %%         #?MODULE{cfg = Cfg,
+    %%                  mode =
+    %%                      #write{type = WriterType,
+    %%                             tail_info = TailInfo,
+    %%                             segment_size = {Size, NumChunks},
+    %%                             current_epoch = Epoch},
+    %%                  current_file = filename:basename(Filename),
+    %%                  fd = SegFd,
+    %%                  index_fd = IdxFd};
+    %%     {1, #seg_info{file = Filename,
+    %%                   index = IdxFilename,
+    %%                   last = undefined}, _} ->
+    %%         %% the empty log case
+    %%         {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
+    %%         {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
+    %%         {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
+    %%         counters:put(Cnt, ?C_SEGMENTS, 1),
+    %%         %% the segment could potentially have trailing data here so we'll
+    %%         %% do a truncate just in case. The index would have been truncated
+    %%         %% earlier
+    %%         ok = file:truncate(SegFd),
+    %%         {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
+    %%         osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
+    %%         osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+    %%         #?MODULE{cfg = Cfg,
+    %%                  mode =
+    %%                      #write{type = WriterType,
+    %%                             tail_info = {DefaultNextOffset, empty},
+    %%                             current_epoch = Epoch},
+    %%                  current_file = filename:basename(Filename),
+    %%                  fd = SegFd,
+    %%                  index_fd = IdxFd}
+    %% end.
 
 non_empty_index_files([]) ->
     [];
@@ -601,22 +547,6 @@ non_empty_index_files(IdxFiles) ->
         _ ->
             IdxFiles
     end.
-
-truncate_invalid_idx_records(IdxFile, SegSize) ->
-    % TODO currently, if we have no valid index records,
-    % we truncate the segment, even though it could theoretically
-    % contain valid chunks. This should never happen in normal
-    % operations, since we write to the index first
-    % and fsync it first. However, it feels wrong, since we can
-    % reconstruct the index from a segment. We should probably
-    % add an option to perform a full segment scan and reconstruct
-    % the index for the valid chunks.
-    SegFile = segment_from_index_file(IdxFile),
-    {ok, IdxFd} = open(IdxFile, [raw, binary, write, read]),
-    {ok, Pos} = position_at_idx_record_boundary(IdxFd, eof),
-    ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
-    ok = file:truncate(IdxFd),
-    file:close(IdxFd).
 
 skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
     case Pos >= ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
@@ -1654,11 +1584,6 @@ orphaned_segments([<<_:20/binary, ".segment">> = Dangler | Rem], Acc) ->
 orphaned_segments([_Unexpected | Rem], Acc) ->
     %% just ignore unexpected files
     orphaned_segments(Rem, Acc).
-
-first_and_last_seginfos(#{index_files := IdxFiles}) ->
-    first_and_last_seginfos0(IdxFiles);
-first_and_last_seginfos(#{dir := Dir}) ->
-    first_and_last_seginfos0(sorted_index_files(Dir)).
 
 first_and_last_seginfos0([]) ->
     none;
