@@ -27,7 +27,10 @@
 %%%===================================================================
 
 all() ->
-    [{group, tests}].
+    [
+        {group, tests},
+        {group, ipv6}
+    ].
 
 all_tests() ->
     [single_node_write,
@@ -82,12 +85,23 @@ all_tests() ->
      single_node_reader_counters,
      cluster_reader_counters,
      combine_ips_hosts_test,
-     empty_last_segment].
+     empty_last_segment,
+     replica_reader_nodedown_noproc].
+
+%% Isolated to avoid test interference
+ipv6_tests() ->
+    [
+        cluster_write_replication_plain_ipv6,
+        cluster_write_replication_tls_ipv6
+    ].
 
 -define(BIN_SIZE, 800).
 
 groups() ->
-    [{tests, [], all_tests()}].
+    [
+        {tests, [], all_tests()},
+        {ipv6,  [], ipv6_tests()}
+    ].
 
 init_per_suite(Config) ->
     osiris:configure_logger(logger),
@@ -96,10 +110,18 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
+init_per_group(ipv6, Config) ->
+    application:set_env(kernel, prevent_overlapping_partitions, false),
+    application:set_env(osiris, replica_ip_address_family, inet6),
+    Config;
 init_per_group(_Group, Config) ->
     application:set_env(kernel, prevent_overlapping_partitions, false),
+    application:set_env(osiris, replica_ip_address_family, inet),
     Config.
 
+end_per_group(ipv6, _Config) ->
+    application:set_env(osiris, replica_ip_address_family, inet),
+    ok;
 end_per_group(_Group, _Config) ->
     ok.
 
@@ -120,8 +142,19 @@ init_per_testcase(TestCase, Config) ->
      | Config].
 
 extra_init(cluster_write_replication_tls) ->
+    Make = case os:getenv("MAKE") of
+               Value when is_list(Value) ->
+                   Value;
+               false ->
+                   case os:find_executable("gmake") of
+                       Value when is_list(Value) ->
+                           "gmake";
+                       false ->
+                           "make"
+                   end
+           end,
     TlsGenDir = os:getenv("DEPS_DIR") ++ "/tls_gen/basic",
-    TlsGenCmd = "make -C " ++ TlsGenDir ++ " CN=$(hostname -s) CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
+    TlsGenCmd = Make ++ " -C " ++ TlsGenDir ++ " CN=$(hostname -s) CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
     TlsGenBasicOutput = os:cmd(TlsGenCmd),
     Hostname = string:trim(os:cmd("hostname -s"), both, "\n"),
     ct:pal(?LOW_IMPORTANCE, "~ts: ~ts", [TlsGenCmd, TlsGenBasicOutput]),
@@ -142,6 +175,14 @@ extra_init(cluster_write_replication_tls) ->
         {secure_renegotiate, true},
         {verify,verify_peer}
     ]),
+    ok;
+extra_init(cluster_write_replication_tls_ipv6) ->
+    extra_init(cluster_write_replication_tls),
+    application:set_env(osiris, replica_ip_address_family, inet6),
+    ok;
+extra_init(cluster_write_replication_plain_ipv6) ->
+    application:set_env(osiris, replication_transport, tcp),
+    application:set_env(osiris, replica_ip_address_family, inet6),
     ok;
 extra_init(_) ->
     application:set_env(osiris, replication_transport, tcp),
@@ -287,7 +328,13 @@ start_many_clusters(Config) ->
 cluster_write_replication_plain(Config) ->
     cluster_write(Config, undefined).
 
+cluster_write_replication_plain_ipv6(Config) ->
+    cluster_write(Config, undefined).
+
 cluster_write_replication_tls(Config) ->
+    cluster_write(Config, undefined).
+
+cluster_write_replication_tls_ipv6(Config) ->
     cluster_write(Config, undefined).
 
 cluster_write_replication_plain_with_filter(Config) ->
@@ -1847,6 +1894,16 @@ empty_last_segment(Config) ->
         osiris:start_cluster(Conf1),
     timer:sleep(100),
     ?assert(erlang:is_process_alive(Leader2)),
+    ok.
+
+replica_reader_nodedown_noproc(_Config) ->
+    %% unit test to ensure we handle down nodes gracefully.
+    {error, {nodedown, 'banana@fruit'}} =
+        osiris_replica_reader:start('banana@fruit', #{}),
+
+    _ = application:stop(osiris),
+    {error, noproc} =
+        osiris_replica_reader:start(node(), #{}),
     ok.
 
 %% Utility

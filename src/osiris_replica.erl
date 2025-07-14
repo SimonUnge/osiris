@@ -231,6 +231,7 @@ handle_continue(#{name := Name0,
             ?DEBUG_(Name, "replica listening on port '~b' using transport ~s",
                     [Port, Transport]),
             Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
+            ?DEBUG_(Name, "starting replica reader on node '~w'", [Node]),
 
             ReplicaReaderConf = #{hosts => IpsHosts,
                                   port => Port,
@@ -244,6 +245,7 @@ handle_continue(#{name := Name0,
             case osiris_replica_reader:start(Node, ReplicaReaderConf) of
                 {ok, RRPid} ->
                     true = link(RRPid),
+                    ?DEBUG_(Name, "started replica reader on node '~w'", [Node]),
                     GcInterval0 = application:get_env(osiris,
                                                       replica_forced_gc_default_interval,
                                                       4999),
@@ -279,8 +281,15 @@ handle_continue(#{name := Name0,
                                        transport = Transport},
                               log = Log,
                               parse_state = undefined}};
+                {error, {connection_refused = R, _}} ->
+                    %% we don't log details for connection_refused,
+                    %% they are already in the logs of the other node
+                    ?WARN_(Name, "failed to start replica reader on node '~w'. "
+                           "Reason ~0p.", [Node, R]),
+                    {stop, {shutdown, R}, undefined};
                 {error, Reason} ->
-                    ?WARN_(Name, " failed to start replica reader. Reason ~0p", [Reason]),
+                    ?WARN_(Name, "failed to start replica reader on node '~w'. "
+                           "Reason ~0p.", [Node, Reason]),
                     {stop, {shutdown, Reason}, undefined}
             end
     end.
@@ -330,25 +339,31 @@ accept(Name, tcp, LSock, Process) ->
     end;
 accept(Name, ssl, LSock, Process) ->
     ?DEBUG_(Name, "Starting socket acceptor for replication over TLS", []),
-    {ok, Sock0} = ssl:transport_accept(LSock),
-    SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
-    case ssl:handshake(Sock0, SslOptions) of
-        {ok, Sock} ->
+    case ssl:transport_accept(LSock) of
+        {ok, Sock0} ->
+            SslOpts = application:get_env(osiris, replication_server_ssl_options, []),
+            case ssl:handshake(Sock0, SslOpts) of
+                {ok, Sock} ->
+                    _ = ssl:close(LSock),
+                    ok = ssl:controlling_process(Sock, Process),
+                    Process ! {socket, Sock},
+                    ok;
+                {error, {tls_alert, {handshake_failure, _}}} ->
+                    ?DEBUG_(Name, "Handshake failure, restarting listener...",
+                            []),
+                    _ = spawn_link(fun() -> accept(Name, ssl, LSock, Process) end),
+                    ok;
+                {error, E} ->
+                    ?DEBUG_(Name, "Error during handshake ~w", [E]);
+                H ->
+                    ?DEBUG_(Name, "Unexpected result from TLS handshake ~w", [H])
+            end,
+            ok;
+        {error, Err} ->
+            ?DEBUG_(Name, "ssl:transport_accept/1 failed with ~0p", [Err]),
             _ = ssl:close(LSock),
-            ok = ssl:controlling_process(Sock, Process),
-            Process ! {socket, Sock},
-            ok;
-        {error, {tls_alert, {handshake_failure, _}}} ->
-            ?DEBUG_(Name, "Handshake failure, restarting listener...",
-                    []),
-            _ = spawn_link(fun() -> accept(Name, ssl, LSock, Process) end),
-            ok;
-        {error, E} ->
-            ?DEBUG_(Name, "Error during handshake ~w", [E]);
-        H ->
-            ?DEBUG_(Name, "Unexpected result from TLS handshake ~w", [H])
-    end,
-    ok.
+            ok
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -531,7 +546,12 @@ handle_info({'EXIT', RRPid, Info},
                                 replica_reader_pid = RRPid}} = State) ->
     %% any replica reader exit is troublesome and requires the replica to also
     %% terminate
-    ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
+    case lists:member(Info, [normal, shutdown]) of
+        true ->
+            ?DEBUG_(Name, "replica reader ~w exited with ~w", [RRPid, Info]);
+        false ->
+            ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info])
+    end,
     {stop, {shutdown, Info}, State};
 handle_info({'EXIT', Ref, normal},
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
@@ -746,7 +766,11 @@ listener_opts(tcp) ->
     ReuseAddr = application:get_env(osiris, replica_reuseaddr, true),
     Linger = application:get_env(osiris, replica_linger, true),
     LingerTimeout = application:get_env(osiris, replica_linger_timeout, 0),
+
+    IPAddrFamily = osiris_util:get_replica_listener_inet_address_family(),
+
     [binary,
+     IPAddrFamily,
      {reuseaddr, ReuseAddr},
      {linger, {Linger, LingerTimeout}},
      {backlog, 0},
