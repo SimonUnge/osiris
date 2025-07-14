@@ -1,6 +1,6 @@
 PROJECT = osiris
 # PROJECT_DESCRIPTION = Foundation of the log-based streaming subsystem for RabbitMQ
-# PROJECT_VERSION = v1.8.2
+# PROJECT_VERSION = v1.8.9
 
 # define PROJECT_ENV
 # [
@@ -30,5 +30,3 @@ DIALYZER_OPTS += --src -r test -Wunmatched_returns -Werror_handling
 PLT_APPS += seshat ssl eunit common_test
 EUNIT_OPTS = no_tty, {report, {eunit_progress, [colored, profile]}}
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
-
-include mk/bazel.mk
